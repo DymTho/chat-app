@@ -1,0 +1,76 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isSelf(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function changedOnly(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
+    }
+
+    // Public profile of every user (needed for names, presence, people list).
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create, update: if isSelf(uid);
+      allow delete: if false;
+    }
+
+    // Profile pictures (base64 JPEG, free-plan alternative to Cloud Storage).
+    match /avatars/{uid} {
+      allow read: if signedIn();
+      allow write: if isSelf(uid)
+        && request.resource.data.data is string
+        && request.resource.data.data.size() < 400000;
+    }
+
+    match /chats/{chatId} {
+      function isMember() {
+        return signedIn() && request.auth.uid in resource.data.members;
+      }
+
+      // resource == null lets a client listen to a direct chat it just created.
+      allow read: if signedIn() && (resource == null || request.auth.uid in resource.data.members);
+
+      allow create: if signedIn() && request.auth.uid in request.resource.data.members;
+
+      // Members update last message / unread counters / typing flags.
+      // Anyone may join the shared "global" group (members only, never shrink).
+      allow update: if isMember()
+        || (chatId == 'global'
+            && changedOnly(['members', 'type', 'name'])
+            && request.resource.data.members.hasAll(resource.data.members)
+            && request.auth.uid in request.resource.data.members);
+
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        function chatMember() {
+          return signedIn()
+            && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members;
+        }
+
+        allow read: if chatMember();
+
+        allow create: if chatMember()
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 4000;
+
+        // Sender can edit/delete; any member can only change reactions.
+        allow update: if chatMember()
+          && (resource.data.senderId == request.auth.uid
+              || changedOnly(['reactions']));
+
+        allow delete: if false;
+      }
+    }
+  }
+}
